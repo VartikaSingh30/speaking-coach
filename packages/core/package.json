@@ -1,0 +1,17 @@
+{
+  "name": "@echo/core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p .",
+    "dev": "tsc -p . --watch",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "tsc -p . && node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "typescript": "^5.6.2"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "echo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:core\" \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "cd apps/api && npm run dev",
+    "dev:web": "cd apps/web && npm run dev",
+    "dev:core": "cd packages/core && npm run build",
+    "build": "npm run build:core && npm run build:api && npm run build:web",
+    "build:core": "cd packages/core && npm run build",
+    "build:api": "cd apps/api && npm run build",
+    "build:web": "cd apps/web && npm run build",
+    "typecheck": "npm run typecheck:core && npm run typecheck:api && npm run typecheck:web",
+    "typecheck:core": "cd packages/core && npm run typecheck",
+    "typecheck:api": "cd apps/api && npm run typecheck",
+    "typecheck:web": "cd apps/web && npm run typecheck",
+    "test": "cd packages/core && npm test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "install:all": "npm install && cd apps/api && npm install && cd ../web && npm install && cd ../../packages/core && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "prettier": "^3.6.2"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.22-rc.20250304"
+  }
+}

@@ -1,0 +1,69 @@
+# ----- Dependencies -----
+node_modules/
+.pnp
+.pnp.js
+
+# ----- Build output / caches -----
+.next/
+out/
+dist/
+build/
+coverage/
+.turbo/
+*.tsbuildinfo
+.vercel/
+
+# ----- Environment & secrets -----
+# Never commit real credentials. Use the *.env.example templates instead.
+.env
+.env.*
+!.env.example
+!apps/api/.env.example
+!apps/web/.env.example
+
+# Google Cloud / service-account credential files
+*.pem
+*.key
+*.p12
+*.json.key
+*-key.json
+*service-account*.json
+*credentials*.json
+google-credentials*.json
+gcp-*.json
+**/credentials*.json
+**/*service-account*.json
+
+# ----- Internal AI/session working files -----
+docs/ai/
+.ai/
+.cursor/
+.claude/
+.codex/
+PROJECT_MEMORY.md
+ARCHITECTURE_INVARIANTS.md
+PHASE_HISTORY.md
+NEXT_WORK.md
+VALIDATION.md
+AI_NOTES.md
+GEMINI_FIX_README.md
+*PHASE*
+*phase*
+*scratch*
+*SCRATCH*
+*audit*
+*AUDIT*
+
+# ----- Local scratch / logs -----
+dev.log
+*.log
+curl.json
+session-payload.json
+
+# ----- OS / editor junk -----
+.DS_Store
+Thumbs.db
+*.swp
+.idea
+.vscode/*
+!.vscode/settings.json
