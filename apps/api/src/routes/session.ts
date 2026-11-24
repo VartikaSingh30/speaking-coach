@@ -123,7 +123,9 @@ function scoreSession(p: {
   const clarity = clamp(100 - p.fillerPerMin * 5, 0, 100);
   const presence = clamp(p.eyeContactPct * 0.6 + p.smilePct * 0.4, 0, 100);
   // Derived from the transcript when available; falls back to a neutral baseline.
-  const structure = p.transcript && p.transcript.trim() ? structureScore(p.transcript) : 70;
+  const structure = p.transcript && p.transcript.trim()
+  ? structureScore(p.transcript)
+  : 0;
   const total = Math.round(delivery * 0.3 + clarity * 0.25 + presence * 0.25 + structure * 0.2);
 
   return {
@@ -174,15 +176,22 @@ router.post("/end", async (req, res) => {
 
     // Inputs from client
     const transcript = sanitizeTranscript(req.body?.transcript);
+    
+    if (!transcript || transcript.trim().split(/\s+/).length < 5) {
+  return res.status(400).json({
+    ok: false,
+    error: "Not enough speech detected. Please speak at least 5 words before generating your report."
+  });
+}
     const durationMs = num(req.body?.durationMs, 0);
     const speakingRatioPct = clamp(num(req.body?.speakingRatioPct, 0), 0, 100);
-    const avgLoudnessDb = num(req.body?.avgLoudnessDb, -30);
+    const avgLoudnessDb = num(req.body?.avgLoudnessDb, -80);
 
-    const avgWpm = num(req.body?.avgWpm, 160);
-    const fillerPerMin = num(req.body?.fillerPerMin, 4);
-    const eyeContactPct = clamp(num(req.body?.eyeContactPct, 60), 0, 100);
-    const smilePct = clamp(num(req.body?.smilePct, 35), 0, 100);
-    const pauseMedianMs = num(req.body?.pauseMedianMs, 350);
+    const avgWpm = num(req.body?.avgWpm, 0);
+const fillerPerMin = num(req.body?.fillerPerMin, 0);
+const eyeContactPct = clamp(num(req.body?.eyeContactPct, 0), 0, 100);
+const smilePct = clamp(num(req.body?.smilePct, 0), 0, 100);
+const pauseMedianMs = num(req.body?.pauseMedianMs, 0);
 
     // Update session (create if /start was skipped)
     const existing = findSessionById(sessionId);
@@ -214,63 +223,63 @@ router.post("/end", async (req, res) => {
       transcript,
     });
 
-    // Optional: call Gemini for review (soft-fail, never blocks success of report)
-    let review: ReviewLite | undefined;
-    if (transcript && process.env.GEMINI_API_KEY) {
-      const minutesSpoken = Math.max(0.5, (durationMs || 1) / 60000);
-      try {
-        const r: GeminiReview = await geminiReview({
-          transcript,
-          minutesSpoken,
-          avgWpm,
-          fillersPerMin: fillerPerMin,
-          speakingRatioPct,
-          avgLoudnessDb,
-        });
-
-        // Narrow to the ReviewLite shape we store
-        review = {
-          summary: r.summary,
-          strengths: r.strengths,
-          issues: r.issues,
-          toneCoaching: r.toneCoaching,
-          englishCoaching: r.englishCoaching,
-          sevenDayPlan: r.sevenDayPlan,
-          quickTips: r.quickTips,
-          interviewRewrite: r.interviewRewrite
-            ? {
-                concise: r.interviewRewrite.concise,
-                star: {
-                  situation: r.interviewRewrite.star?.situation,
-                  task: r.interviewRewrite.star?.task,
-                  action: r.interviewRewrite.star?.action,
-                  result: r.interviewRewrite.star?.result,
-                  finalAnswer: r.interviewRewrite.star?.finalAnswer,
-                },
-                strongerPhrases: r.interviewRewrite.strongerPhrases,
-                followUps: r.interviewRewrite.followUps,
-              }
-            : undefined,
-        };
-      } catch (e: any) {
-        // eslint-disable-next-line no-console
-        console.warn("[/session/end] geminiReview failed:", e?.message || String(e));
-      }
-    }
-
-    // Persist the report — include the review if we got one
+    // Persist and return scores immediately; the report page polls for the review.
     const reportId = genId(12);
     const report: Report = {
       reportId,
       sessionId,
       scores,
       createdAt: new Date(),
-      ...(review ? { review } : {}),
     };
     addReport(report);
 
-    // Respond with everything the client needs right now
-    res.json({ ok: true, scores, reportId, review: review ?? null });
+    res.json({ ok: true, scores, reportId, review: null });
+
+    if (transcript && process.env.GEMINI_API_KEY) {
+      const minutesSpoken = Math.max(0.5, (durationMs || 1) / 60000);
+      const reviewInput = {
+        transcript,
+        minutesSpoken,
+        avgWpm,
+        fillersPerMin: fillerPerMin,
+        speakingRatioPct,
+        avgLoudnessDb,
+      };
+      setImmediate(() => {
+        void geminiReview(reviewInput).then((r: GeminiReview) => {
+          // Narrow to the ReviewLite shape we store
+          const review: ReviewLite = {
+            summary: r.summary,
+            strengths: r.strengths,
+            issues: r.issues,
+            toneCoaching: r.toneCoaching,
+            englishCoaching: r.englishCoaching,
+            sevenDayPlan: r.sevenDayPlan,
+            quickTips: r.quickTips,
+            interviewRewrite: r.interviewRewrite
+              ? {
+                  concise: r.interviewRewrite.concise,
+                  star: {
+                    situation: r.interviewRewrite.star?.situation,
+                    task: r.interviewRewrite.star?.task,
+                    action: r.interviewRewrite.star?.action,
+                    result: r.interviewRewrite.star?.result,
+                    finalAnswer: r.interviewRewrite.star?.finalAnswer,
+                  },
+                  strongerPhrases: r.interviewRewrite.strongerPhrases,
+                  followUps: r.interviewRewrite.followUps,
+                }
+              : undefined,
+          };
+          report.review = review;
+        }).catch((e: unknown) => {
+          const message = e instanceof Error ? e.message : String(e);
+          console.warn("[/session/end] geminiReview failed:", message);
+          report.reviewError = message;
+        });
+      });
+    }
+
   } catch (e: any) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
@@ -301,16 +310,25 @@ router.get("/:sessionId/report/:reportId", (req, res) => {
  * ---------------------------------------------------------------- */
 router.get("/:sessionId/review", (req, res) => {
   const list = listReportsBySession(req.params.sessionId);
-  const withReview = list.find((r) => r.review);
-  if (!withReview) {
+  const report = list[0];
+  if (!report) {
     // Return 200 with a pending flag so clients don't treat it as an error
     return res.json({ pending: true });
   }
+  if (report.reviewError) {
+    return res.json({
+      pending: false,
+      reportId: report.reportId,
+      error: report.reviewError,
+    });
+  }
+  if (!report.review) return res.json({ pending: true });
+
   res.json({
-    reportId: withReview.reportId,
-    review: withReview.review,
-    scores: withReview.scores,
-    createdAt: withReview.createdAt,
+    reportId: report.reportId,
+    review: report.review,
+    scores: report.scores,
+    createdAt: report.createdAt,
   });
 });
 

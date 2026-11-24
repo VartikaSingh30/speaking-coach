@@ -73,6 +73,7 @@ export interface Report {
 
   // Optional AI review payload (present when Gemini review succeeds)
   review?: ReviewLite;
+  reviewError?: string;
 }
 
 /** ----------------------------------------------------------------

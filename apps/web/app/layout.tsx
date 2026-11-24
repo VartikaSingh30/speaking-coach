@@ -54,7 +54,7 @@ export const metadata: Metadata = {
     description:
       "Real-time coaching, live metrics, and AI reviews that help you speak clearly and confidently.",
   },
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Echo" },
+  other: { "mobile-web-app-capable": "yes" },
   category: "productivity",
 };
 
@@ -118,7 +118,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           aria-hidden
           className="pointer-events-none fixed inset-0 -z-10 opacity-[0.04]"
           style={{
-            backgroundImage: "url('/noise.png')", // optional small noise texture
+            backgroundImage: "url('/noise.svg')",
             backgroundSize: "auto",
           }}
         />

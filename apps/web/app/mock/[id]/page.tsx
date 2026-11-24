@@ -54,26 +54,34 @@ function clamp(n: number, min: number, max: number) {
 }
 
 /* --------------------- Lazy MediaPipe loader --------------------- */
+
+
+
 async function loadFaceLandmarker() {
   const VISION_URL =
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.6/vision_bundle.mjs";
   const WASM_BASE =
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.6/wasm";
 
-  // @ts-ignore – dynamic URL at runtime
-  const vision: any = await import(/* @vite-ignore */ VISION_URL as any);
+  const vision: any = await import(
+    /* webpackIgnore: true */ VISION_URL
+  );
+
   const fileset = await vision.FilesetResolver.forVisionTasks(WASM_BASE);
+
   const landmarker = await vision.FaceLandmarker.createFromOptions(fileset, {
     baseOptions: {
       modelAssetPath:
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.6/face_landmarker.task",
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
     },
     outputFaceBlendshapes: true,
     runningMode: "VIDEO",
     numFaces: 1,
   });
+
   return landmarker;
 }
+
 
 /* ============================== Page ============================== */
 export default function MockInterviewPage({ params }: { params: { id: string } }) {
@@ -110,6 +118,7 @@ export default function MockInterviewPage({ params }: { params: { id: string } }
   const recorder = useRef<MediaRecorder | null>(null);
   const wsCoach = useRef<WebSocket | null>(null);
   const wsLive = useRef<WebSocket | null>(null);
+  const recognitionRef = useRef<any>(null);
   const liveReconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveReconnectAttempts = useRef(0);
   const runningRef = useRef(false);
@@ -327,9 +336,10 @@ export default function MockInterviewPage({ params }: { params: { id: string } }
       };
 
       visionLoopRef.current = requestAnimationFrame(tick);
-    } catch {
-      faceReadyRef.current = false;
-    }
+    } catch (error) {
+  console.error("Mock Interview Vision Error:", error);
+  faceReadyRef.current = false;
+}
   }
 
   function stopVision() {
@@ -347,9 +357,22 @@ export default function MockInterviewPage({ params }: { params: { id: string } }
 
   /* ------------------------ Global teardown ------------------------ */
   const stopAll = useCallback(() => {
-    try { recorder.current?.stop(); } catch {}
-    try { wsCoach.current?.close(); } catch {}
-    try { wsLive.current?.close(); } catch {}
+
+   try { recorder.current?.stop(); } catch {}
+
+try {
+  const recognition = recognitionRef.current;
+  if (recognition) {
+    recognition.onend = null;
+    recognition.stop();
+  }
+} catch {}
+
+recognitionRef.current = null;
+
+try { wsCoach.current?.close(); } catch {}
+try { wsLive.current?.close(); } catch {}
+
     try { mediaStream.current?.getTracks().forEach((t) => t.stop()); } catch {}
 
     stopAudioMeters();
@@ -388,114 +411,128 @@ export default function MockInterviewPage({ params }: { params: { id: string } }
 
   /* -------------------------- Live connect ------------------------- */
   const connectLive = useCallback(() => {
-    if (!runningRef.current) return;
+  if (!runningRef.current) return;
 
-    setLiveStatus("connecting");
-    const socket = new WebSocket(wsLiveUrl);
-    socket.binaryType = "arraybuffer";
-    wsLive.current = socket;
+  const SpeechRecognitionCtor =
+    (window as any).SpeechRecognition ||
+    (window as any).webkitSpeechRecognition;
 
-    socket.onopen = () => {
+  if (!SpeechRecognitionCtor) {
+    setLiveStatus("error");
+    setLiveNotes((prev) => [
+      ...prev.slice(-3),
+      "Speech recognition is not supported. Please use Google Chrome."
+    ]);
+    return;
+  }
+
+  setLiveStatus("connecting");
+
+  try {
+    const recognition = new SpeechRecognitionCtor();
+    recognitionRef.current = recognition;
+
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-IN";
+
+    recognition.onstart = () => {
       setLiveStatus("open");
       liveReconnectAttempts.current = 0;
+    };
 
-      if (!mediaStream.current) return;
+    recognition.onresult = (event: any) => {
+      let interimText = "";
+      let finalChunk = "";
 
-      const audioOnly = new MediaStream(mediaStream.current.getAudioTracks());
-      const mime =
-        MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-          ? "audio/webm;codecs=opus"
-          : MediaRecorder.isTypeSupported("audio/webm")
-          ? "audio/webm"
-          : "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const text = result[0]?.transcript?.trim() ?? "";
 
-      if (!mime) {
-        setLiveNotes((prev) => [...prev.slice(-3), "Browser missing audio/webm support"]);
+        if (!text) continue;
+
+        if (result.isFinal) {
+          finalChunk = joinWithSpace(finalChunk, text);
+        } else {
+          interimText = joinWithSpace(interimText, text);
+        }
+      }
+
+      const now = performance.now();
+
+      if (lastVoiceTickRef.current != null) {
+        voicedMsRef.current += now - lastVoiceTickRef.current;
+      }
+
+      lastVoiceTickRef.current = now;
+
+      if (finalChunk) {
+        setFinalText((prev) => joinWithSpace(prev, finalChunk));
+        lastFinalRef.current = finalChunk;
+
+        const t = performance.now() - startTs.current;
+
+        try {
+          wsCoach.current?.send(
+            JSON.stringify({
+              t,
+              kind: "final",
+              text: finalChunk
+            })
+          );
+        } catch {}
+      }
+
+      setPartialText(interimText);
+      lastPartialRef.current = interimText;
+
+      if (interimText) {
+        const t = performance.now() - startTs.current;
+
+        try {
+          wsCoach.current?.send(
+            JSON.stringify({
+              t,
+              kind: "partial",
+              text: interimText
+            })
+          );
+        } catch {}
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        setLiveStatus("error");
+        setLiveNotes((prev) => [
+          ...prev.slice(-3),
+          "Microphone or speech recognition permission denied."
+        ]);
+      }
+    };
+
+    recognition.onend = () => {
+      if (!runningRef.current || recognitionRef.current !== recognition) {
+        setLiveStatus("closed");
         return;
       }
 
-      try { recorder.current?.stop(); } catch {}
-      recorder.current = new MediaRecorder(
-        audioOnly,
-        mime ? { mimeType: mime, audioBitsPerSecond: 48_000 } : {}
-      );
-
-      const CHUNK_MS = 250;
-      recorder.current.ondataavailable = async (e) => {
-        if (
-          e.data && e.data.size > 0 &&
-          wsLive.current && wsLive.current.readyState === WebSocket.OPEN
-        ) {
-          try {
-            const buf = await e.data.arrayBuffer();
-            wsLive.current.send(buf);
-          } catch {}
-        }
-      };
-
-      recorder.current.start(CHUNK_MS);
-    };
-
-    socket.onmessage = (ev) => {
+      // Restart recognition if Chrome automatically stops it.
       try {
-        if (typeof ev.data !== "string") return;
-        const msg: LiveMsg = JSON.parse(ev.data);
-
-        if (isLiveStateMsg(msg) && msg.note) {
-          if (msg.note !== "connected" && msg.note !== "speech stream ended") {
-            setLiveNotes((prev) => [...prev.slice(-3), msg.note!]);
-          }
-          return;
-        }
-
-        if (isLiveTranscriptMsg(msg)) {
-          const text = (typeof msg.text === "string" ? msg.text : msg.transcript!)?.trim() ?? "";
-          const kind = msg.kind;
-          if (!text) return;
-
-          const now = performance.now();
-          if (lastVoiceTickRef.current != null) voicedMsRef.current += now - lastVoiceTickRef.current;
-          lastVoiceTickRef.current = now;
-
-          if (kind === "partial") {
-            if (text !== lastPartialRef.current) {
-              setPartialText(text);
-              lastPartialRef.current = text;
-            }
-          } else {
-            if (text !== lastFinalRef.current) {
-              setFinalText((prev) => joinWithSpace(prev, text));
-              lastFinalRef.current = text;
-            }
-            setPartialText("");
-            lastPartialRef.current = "";
-          }
-
-          const t = performance.now() - startTs.current;
-          try {
-            wsCoach.current?.send(JSON.stringify({ t, kind, text }));
-          } catch {}
-        }
-      } catch {}
+        recognition.start();
+      } catch {
+        setLiveStatus("closed");
+      }
     };
 
-    socket.onerror = () => setLiveStatus("error");
+    recognition.start();
+  } catch (error) {
+    console.error("Speech recognition error:", error);
+    setLiveStatus("error");
+  }
+}, []);
 
-    socket.onclose = () => {
-      try { recorder.current?.stop(); } catch {}
-      recorder.current = null;
-
-      setLiveStatus("closed");
-      if (!runningRef.current) return;
-
-      const attempt = (liveReconnectAttempts.current += 1);
-      const delay = Math.min(500 * 2 ** (attempt - 1), 5000);
-      if (liveReconnectTimer.current) clearTimeout(liveReconnectTimer.current);
-      liveReconnectTimer.current = setTimeout(connectLive, delay);
-    };
-  }, [wsLiveUrl]);
-
-  const connectLiveMemo = useCallback(connectLive, [connectLive]);
+const connectLiveMemo = useCallback(connectLive, [connectLive]);
 
   /* ---------------------- Mock question flow ----------------------- */
   async function loadNextQuestion() {
@@ -652,13 +689,13 @@ export default function MockInterviewPage({ params }: { params: { id: string } }
 
   /* ------------------------------ UI ------------------------------ */
   return (
-    <main
-      className="
-        relative p-6 max-w-7xl mx-auto
-        bg-[radial-gradient(1200px_400px_at_20%_-10%,#22c55e15,transparent)]
-        bg-[radial-gradient(900px_300px_at_110%_-10%,#38bdf81a,transparent)]
-      "
-    >
+  <main
+    className="
+      relative p-6 max-w-7xl mx-auto
+      bg-[radial-gradient(1200px_400px_at_20%_-10%,#22c55e15,transparent),radial-gradient(900px_300px_at_110%_-10%,#38bdf81a,transparent)]
+    "
+  >
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

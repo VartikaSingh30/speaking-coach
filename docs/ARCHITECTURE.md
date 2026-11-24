@@ -41,7 +41,7 @@ sequenceDiagram
 - **`src/index.ts`** — bootstraps Express, JSON logging, CORS, REST routers, and HTTP→WebSocket upgrade routing for `/ws/live` and `/ws/coaching`. Includes `uncaughtException` / `unhandledRejection` guards.
 - **`src/ws/live.ts`** — validates Google credentials up front, opens a streaming-recognize bidi stream, buffers early audio, applies a heartbeat, and forwards transcripts. Fails soft with a `state` message if creds are missing.
 - **`src/ws/coaching.ts`** — keeps a sliding window of transcript events, computes rolling WPM + filler rate, derives simple tone/energy heuristics, and emits compact, rate-limited nudges. Memory-capped.
-- **`src/routes/session.ts`** — `start` / `end` / report retrieval. `end` sanitizes the transcript, computes scores (including the transcript-derived **structure** heuristic) and calls Gemini (soft-fail — a report is always returned).
+- **`src/routes/session.ts`** — `start` / `end` / report retrieval. `end` sanitizes the transcript, computes scores (including the transcript-derived **structure** heuristic), returns the report immediately, and generates the Gemini review asynchronously.
 - **`src/routes/mock.ts`** — mock lifecycle: generate questions (Gemini with a deterministic fallback), store answers, then grade all answers and finalize into a report.
 - **`src/services/gemini-*.ts`** — Gemini callers in JSON mode with timeouts, exponential backoff, v1beta→v1 fallback, and response validation/repair.
 - **`src/db/*`** — in-memory stores with a MongoDB-ready schema shape.

@@ -12,9 +12,15 @@ function normalizeModelId(raw: string | undefined, fallback: string) {
 
 const DEFAULT_MODEL_ID = "gemini-2.5-flash";
 const MODEL_ID = normalizeModelId(process.env.GEMINI_REVIEW_MODEL, DEFAULT_MODEL_ID);
-const MODEL_PATH = `models/${MODEL_ID}`;
+const FALLBACK_MODEL_ID = normalizeModelId(
+  process.env.GEMINI_REVIEW_FALLBACK_MODEL,
+  DEFAULT_MODEL_ID
+);
+const MODEL_IDS = Array.from(new Set([MODEL_ID, FALLBACK_MODEL_ID]));
 const TEMPERATURE = Number(process.env.GEMINI_REVIEW_TEMPERATURE ?? 0.2);
 const MAX_TOKENS = Number(process.env.GEMINI_REVIEW_MAX_TOKENS ?? 2048);
+const REQUEST_TIMEOUT_MS = 120_000;
+const MAX_ATTEMPTS_PER_VERSION = 1;
 
 /* ----------------------------- Types ----------------------------- */
 export type ReviewInput = {
@@ -126,9 +132,9 @@ function validateReviewShape(obj: any): Review {
   if (!isObj(obj)) throw new Error("review: not an object");
 
   const review: Review = {
-    summary: ensureString(obj.summary),
+    summary: ensureString(obj.summary ?? obj.performanceSummary),
     strengths: ensureStringArray(obj.strengths),
-    issues: ensureStringArray(obj.issues),
+    issues: ensureStringArray(obj.issues ?? obj.biggestIssues ?? obj.bigIssues),
     toneCoaching: ensureStringArray(obj.toneCoaching),
     englishCoaching: {
       patterns: ensureStringArray(obj?.englishCoaching?.patterns),
@@ -149,7 +155,7 @@ function validateReviewShape(obj: any): Review {
             .slice(0, 10)
         : [],
     },
-    sevenDayPlan: ensureStringArray(obj.sevenDayPlan, 10),
+    sevenDayPlan: ensureStringArray(obj.sevenDayPlan ?? obj.sevenDayMicroPlan, 10),
     quickTips: ensureQuickTips(obj.quickTips),
     interviewRewrite: fillInterviewRewriteDefaults(obj.interviewRewrite),
   };
@@ -170,9 +176,37 @@ function validateReviewShape(obj: any): Review {
   return review;
 }
 
-/** Exponential backoff in ms */
-function backoff(attempt: number, base = 400, cap = 4000) {
-  return Math.min(cap, base * 2 ** (attempt - 1));
+/** Exponential backoff in ms, with jitter to avoid synchronized retries. */
+function backoff(attempt: number, base = 1000, cap = 8000) {
+  const delay = Math.min(cap, base * 2 ** (attempt - 1));
+  return Math.round(delay * (0.8 + Math.random() * 0.4));
+}
+
+function retryAfterMs(value: string | null): number {
+  if (!value) return 0;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds)
+    ? seconds * 1000
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, Math.min(delay, 3_000)) : 0;
+}
+
+function isDailyQuotaExceeded(body: string): boolean {
+  try {
+    const error = JSON.parse(body)?.error;
+    if (
+      typeof error?.message === "string" &&
+      /requests? per day limit exceeded/i.test(error.message)
+    ) {
+      return true;
+    }
+    return Array.isArray(error?.details) &&
+      error.details.some((detail: any) =>
+        typeof detail?.quotaId === "string" && /RequestsPerDay/i.test(detail.quotaId)
+      );
+  } catch {
+    return /requests? per day limit exceeded|GenerateRequestsPerDay/i.test(body);
+  }
 }
 
 /** Build request body with correct casing per API version */
@@ -208,7 +242,6 @@ export async function geminiReview(input: ReviewInput): Promise<Review> {
     throw new Error("Missing GEMINI_API_KEY");
   }
 
-  console.log("geminiReview: Making request with model:", MODEL_PATH);
   // Clip + sanitize transcript
   const MAX_CHARS = 160_000;
   const clippedTranscript = sanitizeTranscript((input.transcript || "").slice(0, MAX_CHARS));
@@ -249,18 +282,27 @@ TASK:
    - followUps (4–6).
 
 Return ONLY JSON with the exact keys described.
+
+Use exactly these top-level keys: summary, strengths, issues, toneCoaching,
+englishCoaching, sevenDayPlan, quickTips, interviewRewrite. Do not rename keys.
+The englishCoaching object must contain patterns, examples, and newVocabulary.
 `.trim();
 
   const apiBases: Array<"v1" | "v1beta"> = ["v1beta", "v1"]; // Try v1beta first as it's more stable
   const errors: string[] = [];
 
-  for (const version of apiBases) {
-    attemptLoop: for (let attempt = 1; attempt <= 3; attempt++) {
+  for (const modelId of MODEL_IDS) {
+    const modelPath = `models/${modelId}`;
+    let quotaExhausted = false;
+    console.log("geminiReview: Making request with model:", modelPath);
+
+    versionLoop: for (const version of apiBases) {
+    attemptLoop: for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_VERSION; attempt++) {
       const ctrl = new AbortController();
-      const timeout = setTimeout(() => ctrl.abort(), 25_000);
+      const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const url = `https://generativelanguage.googleapis.com/${version}/${MODEL_PATH}:generateContent?key=${encodeURIComponent(
+        const url = `https://generativelanguage.googleapis.com/${version}/${modelPath}:generateContent?key=${encodeURIComponent(
           apiKey
         )}`;
 
@@ -277,15 +319,21 @@ Return ONLY JSON with the exact keys described.
         clearTimeout(timeout);
 
         if (!resp.ok) {
-          console.error(`[${version}] geminiReview API Error:`, {
+          console.error(`[${modelId}/${version}] geminiReview API Error:`, {
             status: resp.status,
             statusText: resp.statusText,
-            response: txt,
-            url
+            response: txt.slice(0, 1000),
           });
-          const retryable = resp.status === 429 || resp.status >= 500;
-          const err = new Error(`[${version}] ${resp.status} ${txt || resp.statusText}`);
+          const dailyQuotaExceeded = resp.status === 429 && isDailyQuotaExceeded(txt);
+          const retryable = !dailyQuotaExceeded && (resp.status === 429 || resp.status >= 500);
+          const err = new Error(
+            dailyQuotaExceeded
+              ? `Gemini daily request quota reached for ${modelId}. Check Google AI Studio quota/billing or try again after the quota resets.`
+              : `[${modelId}/${version}] ${resp.status} ${txt || resp.statusText}`
+          );
+          (err as any).quotaExhausted = dailyQuotaExceeded;
           (err as any).retryable = retryable;
+          (err as any).retryAfterMs = retryAfterMs(resp.headers.get("retry-after"));
           throw err;
         }
 
@@ -295,7 +343,7 @@ Return ONLY JSON with the exact keys described.
 
         if (!raw || typeof raw !== "string") {
           console.error("Gemini response structure:", JSON.stringify(data, null, 2));
-          throw new Error(`[${version}] empty or non-text response`);
+          throw new Error(`[${modelId}/${version}] empty or non-text response`);
         }
 
         const jsonStr = tryRepairJson(coerceJsonBlock(raw));
@@ -303,30 +351,54 @@ Return ONLY JSON with the exact keys described.
         try {
           parsed = JSON.parse(jsonStr);
         } catch (jsonErr) {
-          console.error(`[${version}] JSON parse error:`, {
+          console.error(`[${modelId}/${version}] JSON parse error:`, {
             raw: raw.substring(0, 500) + (raw.length > 500 ? '...' : ''),
             jsonStr: jsonStr.substring(0, 500) + (jsonStr.length > 500 ? '...' : ''),
             error: jsonErr
           });
-          throw new Error(`[${version}] invalid JSON response`);
+          throw new Error(`[${modelId}/${version}] invalid JSON response`);
         }
 
+        console.log(`[${version}] Parsed Gemini response keys:`, Object.keys(parsed || {}));
+        
         const review = validateReviewShape(parsed);
         review.quickTips = ensureQuickTips(review.quickTips);
         return review;
-      } catch (e: any) {
+
+            } catch (e: any) {
         clearTimeout(timeout);
+
         const isAbort = e?.name === "AbortError";
-        const msg = isAbort ? `[${version}] request timed out` : e?.message || String(e);
+        const msg = isAbort
+          ? `[${modelId}/${version}] request timed out`
+          : e?.message || String(e);
+
         errors.push(msg);
 
+        if (e?.quotaExhausted) {
+          quotaExhausted = true;
+          break attemptLoop;
+        }
+
         const retryable = isAbort || e?.retryable;
-        if (retryable && attempt < 3) {
-          await new Promise((r) => setTimeout(r, backoff(attempt)));
+
+        // Stop retrying immediately for 503 and 429 responses.
+        if (e?.retryable && !isAbort) {
+          break attemptLoop;
+        }
+
+        // Retry timed-out requests only when attempts remain.
+        if (retryable && attempt < MAX_ATTEMPTS_PER_VERSION) {
+          const delay = Math.max(backoff(attempt), e?.retryAfterMs || 0);
+          await new Promise((r) => setTimeout(r, delay));
           continue attemptLoop;
         }
+
         break attemptLoop;
       }
+    }
+
+      if (quotaExhausted) break versionLoop;
     }
   }
 

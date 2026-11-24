@@ -29,6 +29,7 @@ type ReportResp = {
   scores: Scores;
   createdAt: string;
   review?: Review;
+  reviewError?: string;
 };
 
 /* --------------------------- Small utilities --------------------------- */
@@ -172,7 +173,7 @@ export default function ReportPage({ params }: { params: { id: string } }) {
         const data: ReportResp = await r.json();
         setReport(data);
 
-        if (data?.review) {
+        if (data?.review || data?.reviewError) {
           setLoading(false);
           return;
         }
@@ -189,22 +190,28 @@ export default function ReportPage({ params }: { params: { id: string } }) {
             if (pr.ok) {
               const j = await pr.json();
               if (j?.pending) {
-    // keep polling
-  } else if (j?.review) {
-              setReport((prev) =>
-                prev
-                  ? { ...prev, review: j.review as Review, scores: j.scores ?? prev.scores, createdAt: j.createdAt ?? prev.createdAt }
-                  : { reportId: j.reportId, sessionId: params.id, createdAt: j.createdAt ?? new Date().toISOString(), scores: j.scores, review: j.review }
-              );
-              setPolling(false);
-              setLoading(false);
-              return;
-            }}
+                // keep polling
+              } else if (j?.review) {
+                setReport((prev) =>
+                  prev
+                    ? { ...prev, review: j.review as Review, scores: j.scores ?? prev.scores, createdAt: j.createdAt ?? prev.createdAt }
+                    : { reportId: j.reportId, sessionId: params.id, createdAt: j.createdAt ?? new Date().toISOString(), scores: j.scores, review: j.review }
+                );
+                setPolling(false);
+                setLoading(false);
+                return;
+              } else if (j?.error) {
+                setReport((prev) => prev ? { ...prev, reviewError: j.error } : prev);
+                setPolling(false);
+                setLoading(false);
+                return;
+              }
+            }
           } catch {
             // ignore one poll error
           }
-          if (tries < 22) {
-            pollTimer = setTimeout(poll, 2000); // ~44s
+          if (tries < 120) {
+            pollTimer = setTimeout(poll, 2000); // ~4m, allowing fallback models to finish
           } else {
             setPolling(false);
             setLoading(false);
@@ -476,12 +483,18 @@ export default function ReportPage({ params }: { params: { id: string } }) {
           <h2 className="text-lg font-medium">AI Review</h2>
           {loading && <Chip tone="warn">Generating…</Chip>}
           {!loading && hasReview && <Chip tone="good">Ready</Chip>}
-          {!loading && !hasReview && !error && <Chip tone="warn">Not available</Chip>}
+          {!loading && !hasReview && report?.reviewError && <Chip tone="warn">Unavailable</Chip>}
+          {!loading && !hasReview && !report?.reviewError && !error && <Chip tone="warn">Not available</Chip>}
         </div>
 
         {error && (
           <div className="p-4 rounded border border-red-800 bg-red-950 text-red-200">
             Failed to load review: {error}
+          </div>
+        )}
+        {report?.reviewError && !hasReview && (
+          <div className="p-4 rounded border border-amber-800 bg-amber-950 text-amber-200">
+            AI review unavailable: {report.reviewError}
           </div>
         )}
 

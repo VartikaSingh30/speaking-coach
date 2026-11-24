@@ -18,6 +18,7 @@ Echo reads configuration from two files (both git-ignored):
 | `PORT` | No | `8787` | API + WebSocket port. |
 | `LOG_LEVEL` | No | `info` | `silent` \| `error` \| `warn` \| `info` \| `debug`. |
 | `GEMINI_REVIEW_MODEL` | No | `gemini-2.5-flash` | Model for the coaching review. |
+| `GEMINI_REVIEW_FALLBACK_MODEL` | No | `gemini-2.5-flash` | Model tried if the primary review model fails. |
 | `GEMINI_REVIEW_TEMPERATURE` | No | `0.2` | Sampling temperature for review. |
 | `GEMINI_REVIEW_MAX_TOKENS` | No | `2048` | Max output tokens for review. |
 | `GEMINI_MOCK_MODEL` | No | `gemini-2.5-flash` | Model for mock questions + grading. |

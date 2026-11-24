@@ -1,12 +1,13 @@
+
 {
   "compilerOptions": {
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "outDir": "dist",
+    "rootDir": "./src",
     "strict": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
     "paths": {
       "@echo/core": ["../../packages/core/src/index.ts"],
       "@echo/core/*": ["../../packages/core/src/*"]
@@ -14,3 +15,4 @@
   },
   "include": ["src"]
 }
+
